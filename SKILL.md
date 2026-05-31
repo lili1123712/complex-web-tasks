@@ -2805,7 +2805,280 @@ document.querySelectorAll('input, select, textarea').forEach(el => {
 
 ---
 
-## 相关参考文件
+## Chrome DevTools Protocol 扩展功能
+
+以下功能参考自 Chrome DevTools MCP（Google 官方），通过 CDP 直接实现，不依赖 MCP 协议。在通过 Browser 或 CDP 连接 Chrome 时可用。
+
+---
+
+### 1. 页面截图
+
+在任何时候截取当前页面：
+
+```javascript
+// 通过CDP截图
+// await ws.send({id: n, method: 'Page.captureScreenshot', params: {format: 'png'}})
+// 返回base64图片数据
+
+// 截图全页（含滚动区域）
+// await ws.send({id: n, method: 'Page.captureScreenshot', params: {format: 'png', fullPage: true}})
+
+// 截图特定元素
+// await ws.send({id: n, method: 'Page.captureScreenshot', params: {format: 'png', clip: {x, y, width, height, scale: 1}}})
+```
+
+**使用场景：**
+- 执行关键操作前截图保存状态
+- 提交表单后截图确认结果
+- 提取信息时截图备份
+- 排查页面渲染异常
+
+---
+
+### 2. 网络请求分析
+
+查看页面发出的所有网络请求，用于调试或提取数据。
+
+```javascript
+// 启用网络监控
+// await ws.send({id: n, method: 'Network.enable'})
+
+// 获取所有请求日志（在CDP中通过Network.requestWillBeSent事件监听）
+// 每次有请求时CDP会推送：{method: 'Network.requestWillBeSent', params: {requestId, request: {url, method, headers}, type}}
+
+// 获取请求的响应内容
+// await ws.send({id: n, method: 'Network.getResponseBody', params: {requestId: 'xxx'}})
+// 返回：{body: '...', base64Encoded: false}
+
+// 获取响应头
+// Network.responseReceived 事件包含响应头信息
+```
+
+**使用场景：**
+- 提取页面通过API加载的数据（比从DOM提取更完整）
+- 调试页面为什么没有加载某些资源
+- 捕获接口返回的JSON数据直接使用
+- 分析页面性能（资源加载时间、大小）
+
+```python
+# 监听网络请求的伪代码
+await ws.send(json.dumps({'id': 1, 'method': 'Network.enable'}))
+# 监听事件
+async for msg in ws:
+    data = json.loads(msg)
+    if data.get('method') == 'Network.requestWillBeSent':
+        req = data['params']['request']
+        if 'api' in req['url'] or '.json' in req['url']:
+            print(f"API请求: {req['url']}")
+    if data.get('method') == 'Network.responseReceived':
+        resp = data['params']['response']
+        print(f"响应: {resp['url']} -> {resp['status']}")
+```
+
+---
+
+### 3. 控制台消息捕获
+
+获取页面中 `console.log/warn/error` 输出的消息。
+
+```javascript
+// 启用控制台
+// await ws.send({id: n, method: 'Console.enable'})
+
+// 监听控制台消息（CDP推送事件）
+// {method: 'Console.messageAdded', params: {message: {level: 'log'|'warning'|'error', text: '...', source: 'console-api', url: '...', line: 123}}}
+
+// 获取当前所有已缓存的控制台消息
+// await ws.send({id: n, method: 'Runtime.evaluate', params: {
+//   expression: `(function() {
+//     // 通过覆盖console来捕获历史消息
+//     if (!window.__consoleMessages) window.__consoleMessages = [];
+//     return window.__consoleMessages;
+//   })()`
+// }})
+```
+
+**使用场景：**
+- 页面报错时捕获错误信息
+- 提取页面通过console输出的调试数据
+- 监控页面JS执行状态
+
+---
+
+### 4. 键盘操作（按键组合）
+
+模拟键盘按键，包括组合键。
+
+```javascript
+// 按单个键
+// await ws.send({id: n, method: 'Input.dispatchKeyEvent', params: {
+//   type: 'rawKeyDown', windowsVirtualKeyCode: 13, key: 'Enter'
+// }})
+
+// 更方便的方式：通过Runtime.evaluate模拟
+async function pressKey(key) {
+    document.dispatchEvent(new KeyboardEvent('keydown', {key, bubbles: true}));
+    document.dispatchEvent(new KeyboardEvent('keyup', {key, bubbles: true}));
+}
+
+// 组合键 (Ctrl+A)
+async function pressCombo(modifier, key) {
+    document.dispatchEvent(new KeyboardEvent('keydown', {key: modifier, bubbles: true}));
+    document.dispatchEvent(new KeyboardEvent('keydown', {key, bubbles: true}));
+    document.dispatchEvent(new KeyboardEvent('keyup', {key, bubbles: true}));
+    document.dispatchEvent(new KeyboardEvent('keyup', {key: modifier, bubbles: true}));
+}
+
+// 使用：pressCombo('Control', 'a')  // Ctrl+A全选
+// 使用：pressKey('Enter')           // 回车
+// 使用：pressKey('Tab')             // Tab切换焦点
+// 使用：pressKey('Escape')          // Esc关闭弹窗
+```
+
+**使用场景：**
+- 快捷键操作（Ctrl+S保存、Ctrl+A全选）
+- 模拟回车提交表单
+- Tab切换输入焦点
+- 通过键盘快捷键触发功能
+
+---
+
+### 5. 页面模拟仿真
+
+模拟不同的设备、网络、地理位置等。
+
+```javascript
+// 模拟移动端视口
+// await ws.send({id: n, method: 'Emulation.setDeviceMetricsOverride', params: {
+//   width: 375, height: 812, deviceScaleFactor: 3, mobile: true
+// }})
+
+// 模拟网络条件
+// await ws.send({id: n, method: 'Network.emulateNetworkConditions', params: {
+//   offline: false,
+//   latency: 150,        // 延迟ms
+//   downloadThroughput: 750 * 1024 / 8,  // 750kbps
+//   uploadThroughput: 250 * 1024 / 8     // 250kbps
+// }})
+// 重置：Network.emulateNetworkConditions with empty/0 params
+
+// 模拟地理位置
+// await ws.send({id: n, method: 'Emulation.setGeolocationOverride', params: {
+//   latitude: 39.9042, longitude: 116.4074  // 北京
+// }})
+
+// 模拟UserAgent
+// await ws.send({id: n, method: 'Emulation.setUserAgentOverride', params: {
+//   userAgent: 'Mozilla/5.0 (iPhone; CPU iPhone OS ...)'
+// }})
+
+// 模拟暗色模式
+// await ws.send({id: n, method: 'Emulation.setAutoDarkModeOverride', params: {enabled: true}})
+```
+
+**使用场景：**
+- 测试移动端页面显示效果
+- 模拟弱网环境测试页面加载
+- 模拟不同地区用户看到的页面
+- 测试暗色模式下的页面表现
+
+---
+
+### 6. 浏览器弹窗处理
+
+处理 `alert`、`confirm`、`prompt` 等浏览器原生弹窗。
+
+```javascript
+// 自动接受所有弹窗
+// await ws.send({id: n, method: 'Page.setInterceptFileChooserDialog', params: {enabled: true}})
+
+// 监听弹窗事件
+// CDP事件：{method: 'Page.javascriptDialogOpening', params: {
+//   url: '...', message: '弹窗内容', type: 'alert'|'confirm'|'prompt',
+//   defaultPrompt: '默认值'
+// }}
+
+// 接受弹窗
+// await ws.send({id: n, method: 'Page.handleJavaScriptDialog', params: {
+//   accept: true, promptText: '输入文本'
+// }})
+
+// 拒绝弹窗
+// await ws.send({id: n, method: 'Page.handleJavaScriptDialog', params: {
+//   accept: false
+// }})
+```
+
+**使用场景：**
+- 自动点击 `alert` 的"确定"
+- 自动确认 `confirm` 对话框
+- 在 `prompt` 中输入文本
+- 防止弹窗阻塞自动化流程
+
+---
+
+### 7. 浏览器扩展管理
+
+安装、卸载、管理 Chrome 扩展。
+
+```javascript
+// 获取已安装的扩展列表
+// await ws.send({id: n, method: 'Runtime.evaluate', params: {
+//   expression: `fetch('chrome://extensions/shortcuts').then(r => r.text()) // 受限
+//   // 或者通过chrome.debugger API
+// `}})
+
+// 注：CDP本身没有直接的扩展管理API
+// 替代方案：在Browser启动时通过--load-extension参数加载扩展
+// chrome.exe --load-extension="C:/path/to/extension"
+```
+
+**使用场景：**
+- 加载需要使用的浏览器扩展
+- 检查扩展是否已启用
+
+---
+
+### 8. 性能追踪
+
+录制和分析页面性能。
+
+```javascript
+// 开始性能追踪
+// await ws.send({id: n, method: 'Tracing.start', params: {
+//   categories: '-*,devtools.timeline,disabled-by-default-devtools.timeline.invalidationTracking',
+//   options: 'sampling-frequency=10000', transferMode: 'ReturnAsStream'
+// }})
+
+// 停止追踪并获取结果
+// await ws.send({id: n, method: 'Tracing.end'})
+// 结果通过Tracing.dataCollected事件流式返回
+
+// 获取性能指标
+// await ws.send({id: n, method: 'Runtime.evaluate', params: {
+//   expression: 'JSON.stringify(performance.getEntriesByType("navigation")[0])'
+// }})
+```
+
+**使用场景：**
+- 分析页面加载性能瓶颈
+- 测量核心Web指标（LCP、FCP、CLS）
+- 对比优化前后的性能差异
+
+---
+
+### 扩展功能速查表
+
+| 功能 | CDP方法 | 用途 | 复杂度 |
+|------|---------|------|--------|
+| 截图 | `Page.captureScreenshot` | 保存页面截图 | ⭐ |
+| 控制台监听 | `Console.enable` | 捕获JS日志/错误 | ⭐ |
+| 网络请求 | `Network.enable` | 捕获API请求和响应 | ⭐⭐ |
+| 键盘操作 | `Input.dispatchKeyEvent` | 模拟按键/组合键 | ⭐ |
+| 弹窗处理 | `Page.handleJavaScriptDialog` | 自动处理alert/confirm | ⭐ |
+| 仿真模拟 | `Emulation.setDeviceMetricsOverride` | 模拟设备/网络/定位 | ⭐⭐ |
+| 性能追踪 | `Tracing.start/end` | 性能分析 | ⭐⭐⭐ |
+| 扩展管理 | 启动参数 `--load-extension` | 加载Chrome扩展 | ⭐⭐ |
 
 本技能目录下提供了以下参考文件：
 
@@ -2846,3 +3119,4 @@ document.querySelectorAll('input, select, textarea').forEach(el => {
 - [ ] 流程不乱：严格按照需求→方案→扫描→计划→执行→验证的顺序
 - [ ] 每步验证：每一步完成后检查是否成功
 - [ ] 信息提取精准：只提取用户需要的相关字段，不提取无关数据
+- [ ] 截图备份：关键操作前后已截图保存
